@@ -1,6 +1,20 @@
 import socket
 import threading
 import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# --- ВЕБ-ЗАГЛУШКА ДЛЯ RENDER ---
+class WebStub(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def run_web_stub(port):
+    server = HTTPServer(("0.0.0.0", port), WebStub)
+    server.serve_forever()
+# ------------------------------
 
 def handle_traffic(source, destination):
     try:
@@ -16,14 +30,21 @@ def handle_traffic(source, destination):
         destination.close()
 
 def start_relay():
+    # Render дает один порт. Мы отдадим его веб-заглушке, чтобы Render не ругался
+    port = int(os.environ.get("PORT", 80))
+    
+    # Запускаем веб-заглушку в отдельном потоке
+    web_thread = threading.Thread(target=run_web_stub, args=(port,), daemon=True)
+    web_thread.start()
+    print(f"[+] Веб-заглушка запущена на порту {port}")
+
+    # А сам наш мост-коммутатор заставим слушать другой порт, например, 5555
+    # (Внутри сети Render он будет доступен)
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    
-    # Render сам передает порт в переменные окружения, если его нет — берем 80
-    port = int(os.environ.get("PORT", 80))
-    server.bind(("0.0.0.0", port))
+    server.bind(("0.0.0.0", 5555))
     server.listen(5)
-    print(f"[+] Сервер-коммутатор запущен на порту {port}. Ожидание подключений...")
+    print("[+] Сервер-коммутатор запущен на порту 5555. Ожидание подключений...")
 
     operator_sock = None
     client_sock = None
@@ -31,7 +52,6 @@ def start_relay():
     while True:
         try:
             sock, addr = server.accept()
-            # Первое, что должен прислать участник — это его роль ("OP" или "CL")
             role = sock.recv(2).decode('utf-8', errors='ignore')
             
             if role == "OP":
@@ -41,7 +61,6 @@ def start_relay():
                 client_sock = sock
                 print("[+] Подключился Клиент.")
             
-            # Как только оба на связи — создаем мост
             if operator_sock and client_sock:
                 print("[+] Оба участника на месте. Запуск моста трафика...")
                 t1 = threading.Thread(target=handle_traffic, args=(operator_sock, client_sock))
@@ -49,7 +68,6 @@ def start_relay():
                 t1.start()
                 t2.start()
                 
-                # Обнуляем переменные для следующих подключений
                 operator_sock = None
                 client_sock = None
                 
